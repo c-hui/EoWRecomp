@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.22)
 # Needs tools/android/build_deps.sh first (FFmpeg, shaderc, Vulkan headers, VMA, volk into build/android/deps, SDL3
 # sources into build/android/SDL3). (After LASRecomp-Android-Plus, MIT.)
 project(eowrecomp C CXX)
+find_program(BASH_EXECUTABLE bash REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 set(DEPS ${ROOT}/build/android/deps)
@@ -24,9 +25,9 @@ set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(${ROOT}/build/android/SDL3 ${CMAKE_BINARY_DIR}/SDL3)
 
 # ---- the game code library's id (runtime/gamelib.h): the same script makes the library's
-execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh OUTPUT_VARIABLE GAMELIB_ID OUTPUT_STRIP_TRAILING_WHITESPACE
+execute_process(COMMAND ${BASH_EXECUTABLE} ${ROOT}/tools/android/gamelib_id.sh OUTPUT_VARIABLE GAMELIB_ID OUTPUT_STRIP_TRAILING_WHITESPACE
                 COMMAND_ERROR_IS_FATAL ANY)
-execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --flags OUTPUT_VARIABLE GAMELIB_FLAGS
+execute_process(COMMAND ${BASH_EXECUTABLE} ${ROOT}/tools/android/gamelib_id.sh --flags OUTPUT_VARIABLE GAMELIB_FLAGS
                 OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 foreach(f tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
           tools/gamelib_entry.c runtime/hle/hle_symbols.txt runtime/cpu.h runtime/simd.h runtime/simd_fp.h
@@ -39,8 +40,8 @@ message(STATUS "game code library id ${GAMELIB_ID}")
 set(SMAA_INC ${CMAKE_BINARY_DIR}/inc/smaa_hlsl.inc)
 add_custom_command(OUTPUT ${SMAA_INC}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/inc
-  COMMAND sh -c "LC_ALL=C tr -d '\\r' < '${ROOT}/third_party/smaa/SMAA.hlsl' | LC_ALL=C tr '\\200-\\377' '?' | sed -e 's/\\\\/\\\\\\\\/g' -e 's/\"/\\\\\"/g' -e 's/^/\"/' -e 's/$/\\\\n\"/' > '${SMAA_INC}'"
-  DEPENDS ${ROOT}/third_party/smaa/SMAA.hlsl VERBATIM)
+  COMMAND ${CMAKE_COMMAND} -DINPUT=${ROOT}/third_party/smaa/SMAA.hlsl -DOUTPUT=${SMAA_INC} -P ${ROOT}/tools/embed_smaa.cmake
+  DEPENDS ${ROOT}/third_party/smaa/SMAA.hlsl ${ROOT}/tools/embed_smaa.cmake VERBATIM)
 
 # ---- the runtime
 file(GLOB RT_SRC CONFIGURE_DEPENDS ${ROOT}/runtime/*.c ${ROOT}/runtime/hle/*.c ${ROOT}/runtime/services/*.c ${ROOT}/runtime/nvn/*.c

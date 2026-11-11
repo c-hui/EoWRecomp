@@ -19,7 +19,7 @@ if (onDevice && !(new File(ondev, 'stage/jniLibs/arm64-v8a/libzig.so').exists() 
 android {
     namespace 'com.eowrecomp.android'
     compileSdk 36
-    ndkVersion '27.2.12479018'
+    ndkVersion project.findProperty('androidNdkVersion') ?: '27.2.12479018'
 
     defaultConfig {
         applicationId 'com.eowrecomp.android'
@@ -104,6 +104,7 @@ android {
 // What the app ships besides code (runtime/paths.c android_resources): the start screen fonts and the icon
 tasks.register('eowAssets', Sync) {  // (Sync: a file gone from the sources goes from the APK too)
     from('../../third_party/fonts') { include '**/*.ttf'; eachFile { path = name }; includeEmptyDirs = false }
+    from('../../third_party/fonts/NotoSansSC/OFL.txt') { into 'licenses/NotoSansSC' }
     from('../../docs/icon/icon_1024.png') { rename { 'icon.png' } }
     into "$buildDir/generated/eow-assets"
 }
