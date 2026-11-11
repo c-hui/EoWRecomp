@@ -29,6 +29,13 @@ def load_keys(path):
         if '=' in line:
             k, v = line.split('=', 1)
             keys[k.strip()] = v.strip()
+    title_keys = os.path.join(os.path.dirname(path), 'title.keys')
+    if os.path.isfile(title_keys) and os.path.abspath(title_keys) != os.path.abspath(path):
+        for line in open(title_keys):
+            if '=' in line:
+                k, v = line.split('=', 1)
+                if len(k.strip()) == 32:
+                    keys[k.strip()] = v.strip()
     return keys
 
 
@@ -51,8 +58,8 @@ class SubFile:
         return self.f.read(n)
 
 
-def nsp_ncas(path):
-    """[(name, offset, size)] of the .nca entries of an NSP (PFS0)."""
+def nsp_entries(path):
+    """[(name, offset, size)] of the entries of an NSP (PFS0)."""
     with open(path, 'rb') as f:
         magic, n, strsz, _ = struct.unpack('<4sIII', f.read(0x10))
         if magic != b'PFS0':
@@ -68,9 +75,33 @@ def nsp_ncas(path):
     out = []
     for off, size, no, _ in ents:
         name = names[no:names.index(b'\0', no)].decode()
-        if name.endswith('.nca') and not name.endswith('.cnmt.nca'):
-            out.append((name, data + off, size))
+        out.append((name, data + off, size))
     return out
+
+
+def nsp_ncas(path):
+    return [(name, off, size) for name, off, size in nsp_entries(path)
+            if name.endswith('.nca') and not name.endswith('.cnmt.nca')]
+
+
+def title_key(path, rights, keys, keygen):
+    # Match the runtime's nxpkg.c: a common ticket in the NSP, then the user's title.keys.
+    encrypted = None
+    if path.lower().endswith('.nsp'):
+        for name, off, size in nsp_entries(path):
+            if not name.endswith('.tik') or size < 0x2B0:
+                continue
+            ticket = SubFile(path, off).read(0x2B0)
+            if ticket[:4] == b'\x04\x00\x01\x00' and ticket[0x2A0:0x2B0] == rights:
+                if ticket[0x281] != 0:
+                    raise SystemExit('personalized tickets are not supported')
+                encrypted = ticket[0x180:0x190]
+                break
+    if encrypted is None and rights.hex() in keys:
+        encrypted = bytes.fromhex(keys[rights.hex()])
+    if encrypted is None:
+        raise SystemExit('the package needs a title key (no common ticket or matching title.keys entry)')
+    return aes_ecb_dec(bytes.fromhex(keys[f'titlekek_{keygen:02x}']), encrypted)
 
 
 def open_program_nca(path, keys):
@@ -104,9 +135,10 @@ class Nca:
         gen = max(hdr[0x206], hdr[0x220])
         self.keygen = gen - 1 if gen else 0
         if any(hdr[0x230:0x240]):
-            raise SystemExit('rights ID set: titlekey crypto is not supported (XCI program NCAs use the key area)')
-        kaek = bytes.fromhex(keys[f'key_area_key_application_{self.keygen:02x}'])
-        self.key_area = aes_ecb_dec(kaek, hdr[0x300:0x340])
+            self.key_area = bytes(0x20) + title_key(path, hdr[0x230:0x240], keys, self.keygen) + bytes(0x10)
+        else:
+            kaek = bytes.fromhex(keys[f'key_area_key_application_{self.keygen:02x}'])
+            self.key_area = aes_ecb_dec(kaek, hdr[0x300:0x340])
         self.sections = []
         for i in range(4):
             st, en = struct.unpack_from('<II', hdr, 0x240 + i * 16)
