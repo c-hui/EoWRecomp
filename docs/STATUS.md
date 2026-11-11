@@ -2,6 +2,12 @@
 
 Atualizado: 2026-10-20 (sessão 3: macOS / Android).
 
+## Android Adreno validation — 2026-11-11
+
+Startup, shadow geometry, packed HUD colors and Chinese text were verified on Adreno 840 / Android 17,
+with targeted GPU/loader/settings regressions and a Windows Vulkan reproduction. See
+[Android validation](ANDROID-validation.md) for causes, commands, screenshots and remaining limitations.
+
 ## Jogo fixado (único build suportado)
 
 | | |
