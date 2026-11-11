@@ -920,6 +920,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int n = sz == 5 ? 2 : 1;
         char rb[16];
         const char *dyn = a == RZ ? NULL : reg(c, a, rb);
+        // LDC.64 reads both words from the original address. A destination can
+        // overlap that address register (the fourth skinning matrix uses R6:R7
+        // loaded through R6); emitting sequential assignments must not retarget
+        // the second load after writing the first word.
+        bool save_addr = dyn && n > 1 && a >= d && a < d + n;
+        if (save_addr) { sp(&c->body, "    { uint ldc_addr = %s;\n", dyn); dyn = "ldc_addr"; }
         for (int i = 0; i < n; i++) {
             char cb[256];
             cbuf_ref(c, idx, off + 4 * i, dyn, cb);
@@ -927,6 +933,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             if (dyn) c->info->cbuf_size[idx] = 0x10000;
             set_reg(c, d + i, cb);
         }
+        if (save_addr) sp(&c->body, "    }\n");
     } else if (OPM(0xd000000000000000ull, 0xf600000000000000ull)) {  // TEXS
         emit_texs(c, w, false);
     } else if (OPM(0xd200000000000000ull, 0xf600000000000000ull)) {  // TLDS
@@ -1433,6 +1440,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             // it in a loop crawls (the little chain chomps in Madam MeowMeow's house: ~4 ms a dispatch, ~0.07 ms without
             // the heap stores). The dispatch's storage buffers are copied to a device-local buffer (gfast_, address
             // table gmap: exec.c gfast_prepare) and back after it: loads and stores inside them use that copy.
+            // Graphics loads also use this address table: mobile GPUs without
+            // host-memory import receive a snapshot of their bound storage buffers.
             // Anything outside the table goes to the heap as before.
             c->info->uses_gmem_map = true;
             static const char *const gl_small[] = {
