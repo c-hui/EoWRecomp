@@ -21,6 +21,9 @@ static shaderc_shader_kind kind_of(int stage) {
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
 static uint64_t src_hash(const char *src, int stage) {
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
+    // Compiler options are part of the cache identity (S2Arm's ProgramBinaryProfile). Toggling
+    // performance optimization must compile the requested variant rather than reuse the old SPIR-V.
+    h ^= getenv("EOWRECOMP_VK_OPT") ? 0x100000001B3ull : 0;
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }

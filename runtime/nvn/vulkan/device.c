@@ -13,6 +13,7 @@
 #include "../../ui/menu.h"
 #include "../../ui/touch.h"
 #include "vk.h"
+#include "pipeline_cache.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -184,7 +185,9 @@ static void create_device(void) {
                                             .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
-                                            .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
+                                            // Uniform blocks use 32-bit words. Adreno 840 does not support 8-bit
+                                            // uniform access, even though storageBuffer8BitAccess is available.
+                                            .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
@@ -242,16 +245,22 @@ static void create_device(void) {
     FILE *fp = fopen("cache/vk_pipelines.bin", "rb");
     if (fp) {
         fseek(fp, 0, SEEK_END);
-        sz = (size_t)ftell(fp);
+        long bytes = ftell(fp);
         fseek(fp, 0, SEEK_SET);
-        data = malloc(sz);
-        if (fread(data, 1, sz, fp) != sz) sz = 0;
+        if (bytes >= 32 && bytes <= VK_PIPELINE_CACHE_MAX_BYTES) {
+            sz = (size_t)bytes;
+            data = malloc(sz);
+            if (!data || fread(data, 1, sz, fp) != sz ||
+                !vk_pipeline_cache_valid(data, sz, g_vk.props.vendorID, g_vk.props.deviceID, g_vk.props.pipelineCacheUUID)) sz = 0;
+        }
         fclose(fp);
+        LOG("[vk] pipeline cache: %s (%zu bytes)\n", sz ? "loaded" : "rejected", sz);
     }
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
                                     .pInitialData = data};
     if (vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache) != VK_SUCCESS) {
         pc.initialDataSize = 0;
+        pc.pInitialData = NULL;
         VK_CHECK(vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache));
     }
     free(data);
@@ -259,15 +268,20 @@ static void create_device(void) {
 
 void vk_pipeline_cache_save(void) {
     size_t sz = 0;
-    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
+    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz || sz > VK_PIPELINE_CACHE_MAX_BYTES) return;
     void *data = malloc(sz);
+    if (!data) return;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
         mkdir("cache", 0755);
         FILE *f = fopen("cache/vk_pipelines.bin.tmp", "wb");
         if (f) {
             bool ok = fwrite(data, 1, sz, f) == sz;
-            fclose(f);
-            if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); }
+            if (fclose(f)) ok = false;
+#ifdef _WIN32
+            if (ok) remove("cache/vk_pipelines.bin");  // Windows rename cannot replace an existing file
+#endif
+            // POSIX rename replaces atomically: background termination must not erase the last good cache.
+            if (!ok || rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin")) remove("cache/vk_pipelines.bin.tmp");
         }
     }
     free(data);
@@ -791,7 +805,18 @@ void ui_window_init(void) {
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("EOWRECOMP_WINDOW") && !getenv("EOWRECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
-    if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+    while (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) {
+#ifdef __ANDROID__
+        // A launch while locked/backgrounded can precede surfaceCreated. Pump events until Android
+        // supplies its native window, as the frame loop already does for a surface lost later.
+        if (!SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL)) {
+            SDL_Event event;
+            if (SDL_WaitEventTimeout(&event, 100) && event.type == SDL_EVENT_QUIT) exit(0);
+            continue;
+        }
+#endif
+        FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+    }
     pick_device();
     create_device();
     create_swapchain();
