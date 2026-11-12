@@ -86,6 +86,7 @@ typedef struct {
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
+static size_t prev_insn(size_t i) { return i % 4 == 1 ? i - 2 : i - 1; }  // (index of the previous instruction, skipping control words)
 static int64_t sbits(uint64_t w, int lo, int n) {
     int64_t v = (int64_t)bits(w, lo, n);
     return (v & (1ll << (n - 1))) ? v - (1ll << n) : v;
@@ -495,6 +496,22 @@ static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
     return s;
 }
 
+// bound image (SUST.B): one slot per handle location in the driver's binding table (c[2]: textures from 0x20, the
+// images bound with nvnCommandBufferBindImage(s) from 0x120, 8 bytes each)
+static int img_slot(Ctx *c, uint32_t offset) {
+    for (int s = 0; s < c->info->ntex; s++) {
+        const ShaderTexture *t = &c->info->tex[s];
+        if (t->is_image && t->handle_offset == offset) return s;
+    }
+    int s = c->info->ntex++;
+    if (s >= 31) { fail(c, "too many textures"); return 0; }
+    ShaderTexture *t = &c->info->tex[s];
+    t->type = TEXTYPE_2D;
+    t->is_image = true;
+    t->handle_offset = offset;
+    return s;
+}
+
 static const char *tex_type_name(int t) {
     switch (t) {
     case TEXTYPE_1D: return "1d";
@@ -509,8 +526,9 @@ static const char *tex_type_name(int t) {
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
 static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs, bool f16) {
-    sp(&c->body, "    { float4 t = %s;\n", call);
-    (void)slot;
+    // a stencil view (ShaderKey.stencil_tex): Maxwell returns the stencil value as the register's bits
+    bool stencil = c->glsl && c->key && slot >= 0 && slot < 16 && ((c->key->stencil_tex >> slot) & 1);
+    sp(&c->body, stencil ? "    { float4 t = uintBitsToFloat(%s);\n" : "    { float4 t = %s;\n", call);
     if (f16) {
         // TEXS/TLDS .F16: components (in mask order) packed as half pairs into d0 (lo, hi) and d1 (lo, hi)
         int comps[4], n = 0;
@@ -1584,8 +1602,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int pd = (int)bits(w, 48, 3);
         if (c->stage == STAGE_VERTEX) {
             set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions: lane-local value
-        } else if (c->glsl) {  // a quad xor (lane mask < 4) is the subgroup xor within the quad
-            static const char *const fn[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
+        } else if (c->glsl) {  // 32-lane warps inside the subgroup (glsl_warp32); a quad xor (lane mask < 4) stays in its quad
+            static const char *const fn[] = {"wshfl", "wshfl_up", "wshfl_down", "wshfl_xor"};
             sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
             set_reg(c, d, t);
         } else if (mode == 3) {
@@ -1611,14 +1629,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         // fields per Ryujinx's InstVote: mode 48-49, Pv 45-47, Ps 39-41 (+ not 42); Rd gets the ballot of Ps. Checked on
         // Echoes of Wisdom's 50d9e3800007000e: VOTE.ANY R14, PT, PT (R14 = the active lanes).
         int mode = (int)bits(w, 48, 2), vp = (int)bits(w, 45, 3);
-        if (mode > 2) fail(c, "vote mode %d", mode);
-        static const char *const gl[] = {"subgroupAll(vp_)", "subgroupAny(vp_)", "subgroupAllEqual(vp_)"};
+        if (mode > 2) { fail(c, "vote mode %d", mode); return; }
+        static const char *const gl[] = {"(wballot(vp_) == wballot(true))", "(wballot(vp_) != 0u)",
+                                         "(wballot(vp_) == wballot(true) || wballot(vp_) == 0u)"};
         static const char *const ms[] = {"simd_all(vp_)", "simd_any(vp_)", "(simd_all(vp_) || !simd_any(vp_))"};
         bool lane = c->stage == STAGE_VERTEX;  // (no subgroup operations in vertex functions: this lane's own vote)
         sp(&c->body, "    { bool vp_ = %s;\n", P((int)bits(w, 39, 3), bits(w, 42, 1)));
         if (d != RZ) {
             c->reg_used[d] = 1;
-            sp(&c->body, "      r%d = %s;\n", d, lane ? "(vp_ ? 1u : 0u)" : c->glsl ? "subgroupBallot(vp_).x" : "uint(uint64_t(simd_ballot(vp_)))");
+            sp(&c->body, "      r%d = %s;\n", d, lane ? "(vp_ ? 1u : 0u)" : c->glsl ? "wballot(vp_)" : "uint(uint64_t(simd_ballot(vp_)))");
         }
         if (vp != PT) {
             c->pred_used[vp] = 1;
@@ -1705,7 +1724,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     p2r_done:;
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
         // computed targets can name a scheduling word; execution continues at the next slot (as for BRA)
-        sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
+        sp(&c->body, c->fwd ? "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; break; }\n"
+                            : "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
            (uint32_t)sbits(w, 20, 24));
     } else if (OPM(0x50a0000000000000ull, 0xfff8000000000000ull)) {  // CSETP (zero/sign flags only)
         int test = (int)bits(w, 8, 5);
@@ -1734,6 +1754,25 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (!c->glsl) sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         else if (c->stage == STAGE_COMPUTE) sp(&c->body, "    barrier();\n");
         else sp(&c->body, "    /* bar */\n");  // GLSL barrier() is compute / tessellation only
+    } else if (c->glsl && OPM(0xeb20000000000000ull, 0xfff8000000000000ull)) {  // SUST.P.B: formatted image store, handle in a register
+        // fields per Ryujinx's InstSustB: data 0-7, coordinates 8-15, rgba mask 20-23, dimension 33-35, handle 39-46.
+        // Checked on Echoes of Wisdom's eb20138600f70018: SUST.P.B.2D.RGBA [R0], R24, R39 in compute 12a4723000,
+        // which filters cube maps into four 2D maps (handles from c[2][0x120..0x138]: bound images 0-3).
+        int hc = (int)bits(w, 39, 8), dim = (int)bits(w, 33, 3);
+        if (c->stage != STAGE_COMPUTE || dim != 3 || bits(w, 20, 4) != 15) { fail(c, "sust dim %d rgba %d", dim, (int)bits(w, 20, 4)); return; }
+        // the handle register is loaded from the binding table a few instructions back (MOV Rh, c[2][0x120 + 8 * slot])
+        const uint64_t *ins = (const uint64_t *)c->code;
+        uint32_t off = 0;
+        for (size_t k = pc / 8, n = 0; k > 1 && n < 64; n++) {
+            k = prev_insn(k);
+            if (bits(ins[k], 0, 8) != (uint64_t)hc) continue;
+            if ((ins[k] & 0xfff8000000000000ull) == 0x4c98000000000000ull && bits(ins[k], 34, 5) == 2) off = (uint32_t)bits(ins[k], 20, 14) * 4;
+            break;
+        }
+        if (off < 0x120 || off >= 0x160 || off % 8) { fail(c, "sust handle r%d not a bound image", hc); return; }
+        int s = img_slot(c, off);
+        sp(&c->body, "    imageStore(t%d, ivec2(int(%s), int(%s)), vec4(as_f(%s), as_f(%s), as_f(%s), as_f(%s)));\n", s, R(a), R(a + 1),
+           R(d), R(d + 1), R(d + 2), R(d + 3));
     } else {
         fail(c, "unknown instruction %016llx at %#x", (unsigned long long)w, pc);
     }
@@ -1756,7 +1795,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         {"float2", "vec2"}, {"float3", "vec3"}, {"float4", "vec4"}, {"int2", "ivec2"}, {"int3", "ivec3"},
         {"int4", "ivec4"}, {"uint2", "uvec2"}, {"uint3", "uvec3"}, {"uint4", "uvec4"}, {"bool2", "bvec2"},
         {"ulong", "uint64_t"}, {"rsqrt", "inversesqrt"}, {"rint", "roundEven"}, {"front_facing", "gl_FrontFacing"},
-        {"point_coord", "gl_PointCoord"}, {"lane", "gl_SubgroupInvocationID"}, {"vid", "uint(gl_VertexIndex)"},
+        {"point_coord", "gl_PointCoord"}, {"lane", "(gl_SubgroupInvocationID & 31u)"}, {"vid", "uint(gl_VertexIndex)"},
         {"iid", "uint(gl_InstanceIndex)"},
         // the MSL-named helpers of the GLSL preamble: Metal built-ins of the same names made MoltenVK's MSL
         // (SPIRV-Cross keeps function names) fail with "call to 'popcount' is ambiguous" (tools/test_moltenvk.sh)
@@ -1889,6 +1928,17 @@ static const char glsl_prelude[] =
     "uint hpack(vec2 r, uint merge, uint old) { if (merge == 1u) return floatBitsToUint(r.x); uint lo = packHalf2x16(vec2(r.x, 0.0f)), hi = packHalf2x16(vec2(r.y, 0.0f)); if (merge == 2u) return (old & 0xFFFF0000u) | lo; if (merge == 3u) return (old & 0xFFFFu) | (hi << 16); return lo | (hi << 16); }\n"
     "uint prmt(uint a, uint b, uint sel) { uint r = 0u; for (uint i = 0u; i < 4u; i++) { uint s = (sel >> (i * 4u)) & 7u; uint bt = s < 4u ? (a >> (s * 8u)) & 0xFFu : (b >> ((s - 4u) * 8u)) & 0xFFu; r |= bt << (i * 8u); } return r; }\n";
 
+// Maxwell warps have 32 lanes; Vulkan subgroups can be wider (64 / 128 on Adreno): each 32 lanes of the subgroup act
+// as one warp - lane ids, shuffles, ballots and votes stay inside it. Echoes of Wisdom's light loop (fs 12ee66f300)
+// merges its light lists over the warp (ballot + shuffles): with subgroup-wide operations the upper 32 lanes took the
+// lower half's lights - 2x2-pixel sparkles around every light on an Adreno 740. A 32-lane subgroup: as before.
+static const char glsl_warp32[] =
+    "uint wballot(bool p) { return subgroupBallot(p)[gl_SubgroupInvocationID >> 5]; }\n"
+    "uint wshfl(uint v, uint i) { return subgroupShuffle(v, (gl_SubgroupInvocationID & ~31u) | (i & 31u)); }\n"
+    "uint wshfl_xor(uint v, uint m) { return subgroupShuffleXor(v, m & 31u); }\n"
+    "uint wshfl_up(uint v, uint d) { uint l = gl_SubgroupInvocationID & 31u; uint s = subgroupShuffle(v, gl_SubgroupInvocationID - min(d, l)); return d <= l ? s : v; }\n"
+    "uint wshfl_down(uint v, uint d) { uint l = gl_SubgroupInvocationID & 31u; uint s = subgroupShuffle(v, gl_SubgroupInvocationID + min(d, 31u - l)); return l + d < 32u ? s : v; }\n";
+
 static const char *glsl_sampler_type(const ShaderTexture *t) {
     static const char *const names[][2] = {
         {"sampler1D", "sampler1DShadow"}, {"sampler2D", "sampler2DShadow"}, {"sampler3D", "sampler3D"},
@@ -1913,6 +1963,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
     sp(&s, "%s", glsl_prelude);
+    if (stage != STAGE_VERTEX) sp(&s, "%s", glsl_warp32);
     for (int i = 0; i < 18; i++) {
         if (!(info->cbuf_mask & (1u << i))) continue;
         uint32_t n = info->cbuf_size[i] / 16;
@@ -1943,7 +1994,13 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
-        sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
+        if (t->is_image) {  // (written only; no format qualifier: shaderStorageImageWriteWithoutFormat)
+            sp(&s, "layout(set = %d, binding = %d) uniform writeonly image2D t%d;\n", set, 32 + i, i);
+            continue;
+        }
+        // the stencil of a depth-stencil texture: an integer sampler, its value as bits (write_tex_result)
+        bool stencil = key && i < 16 && ((key->stencil_tex >> i) & 1) && !t->shadow;
+        sp(&s, "layout(set = %d, binding = %d) uniform %s%s t%d;\n", set, 32 + i, stencil ? "u" : "", glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
         case TEXTYPE_1D: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1, 1); }\n", i, i); break;
@@ -2051,6 +2108,44 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     return info;
 }
 
+// A BRX through a jump table, as the NVN compiler makes it: `IMNMX Ri, Ri, bound` (min, true predicate), `LDC Rd,
+// c[0x1][Ri' + off]` (Ri' = Ri << 2 in between), `BRX Rd + imm`, the table among the compiler's constants (cbuf 1, at
+// the blob's const_offset = max_size). Its bound + 1 targets go into label[] when all lie ahead in the program: the
+// structured form then takes the BRX as one more forward jump. Anything else: false (the dispatch loop as before).
+// Echoes of Wisdom's skinning vertex shader (12ee694000, a switch on the bone count) fell back to the dispatch loop:
+// 48 registers and ~575 spill loads/stores on Turnip, 3.3 ms a draw on an Adreno 740.
+static bool brx_targets(const uint8_t *code, const uint8_t *blob, size_t max_size, size_t const_size,
+                        size_t i, size_t end, uint8_t *label) {
+    const uint64_t *ins = (const uint64_t *)code;
+    uint64_t brx = ins[i];
+    if (!const_size || max_size >= 0x10000 || i < 6) return false;  // (no compiler constants known)
+    size_t li = prev_insn(i);
+    uint64_t ldc = ins[li];
+    if ((ldc & 0xfff8000000000000ull) != 0xef90000000000000ull || bits(ldc, 36, 5) != 1 || bits(ldc, 48, 3) == 5 ||
+        bits(ldc, 0, 8) != bits(brx, 8, 8))
+        return false;
+    int64_t bound = -1;
+    for (size_t k = li, n = 0; k > 4 && n < 8 && bound < 0; n++) {  // the clamp of the index, a few instructions back
+        k = prev_insn(k);
+        uint64_t w = ins[k];
+        if ((w & 0xfef8000000000000ull) == 0x3820000000000000ull && bits(w, 39, 3) == 7 && !bits(w, 42, 1) && !bits(w, 56, 1))
+            bound = (int64_t)bits(w, 20, 19);
+    }
+    uint32_t off = (uint32_t)bits(ldc, 20, 16);
+    if (bound < 0 || bound > 63) return false;
+    // max_size bounds the instructions, not the trailing compiler constants. A caller with only a code
+    // buffer (tests, unknown layouts) must never read a table outside it; keep the dispatch fallback.
+    if ((off & 3) || off > const_size || (uint64_t)(bound + 1) * 4 > const_size - off) return false;
+    const uint32_t *table = (const uint32_t *)(blob + max_size + off);
+    uint32_t pc = (uint32_t)(i * 8);
+    for (int64_t k = 0; k <= bound; k++) {
+        int64_t t = norm_target((int64_t)pc + 8 + (int32_t)table[k] + sbits(brx, 20, 24));
+        if (t <= (int64_t)pc || (size_t)(t / 8) >= end || t % 8) return false;
+    }
+    for (int64_t k = 0; k <= bound; k++) label[norm_target((int64_t)pc + 8 + (int32_t)table[k] + sbits(brx, 20, 24)) / 8] = 1;
+    return true;
+}
+
 ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
     ShaderInfo *info = calloc(1, sizeof *info);
     info->stage = stage;
@@ -2065,6 +2160,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     // compute programs have no SPH. Older NVN (Link's Awakening): no header either, code starts at the blob. Newer NVN
     // (Echoes of Wisdom, SDK 16.2): a 0x100-byte header starting with the magic 0x12345679 (graphics: 0x12345678).
     if (stage == STAGE_COMPUTE) code = *(const uint32_t *)blob == 0x12345679u ? blob + 0x100 : blob;
+    c->code = code;
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
@@ -2120,10 +2216,12 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
                 }
             }
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: a known jump table, else any instruction a target
             any_branch = true;
-            forward = false;
-            memset(label, 1, end);
+            if (!brx_targets(code, blob, max_size, c->glsl && key ? key->const_size : 0, i, end, label)) {
+                forward = false;
+                memset(label, 1, end);
+            }
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)

@@ -19,10 +19,12 @@ if (onDevice && !(new File(ondev, 'stage/jniLibs/arm64-v8a/libzig.so').exists() 
 android {
     namespace 'com.eowrecomp.android'
     compileSdk 36
+    buildToolsVersion project.findProperty('androidBuildToolsVersion') ?: '36.0.0'
     ndkVersion project.findProperty('androidNdkVersion') ?: '27.2.12479018'
 
     defaultConfig {
-        applicationId 'com.eowrecomp.android'
+        // A separate ID lets a personal test build coexist with an APK signed on another computer.
+        applicationId project.findProperty('eowApplicationId') ?: 'com.eowrecomp.android'
         minSdk 30          // Android 11: Vulkan 1.1+, AAudio, MAP_FIXED_NOREPLACE kernels
         targetSdk 36
         versionCode((project.findProperty('eowVersionCode') ?: '1') as int)
@@ -30,7 +32,8 @@ android {
         ndk {
             abiFilters 'arm64-v8a'
         }
-        manifestPlaceholders = [extractNativeLibs: onDevice ? 'true' : 'false']
+        manifestPlaceholders = [extractNativeLibs: onDevice ? 'true' : 'false',
+                                eowAppLabel: project.findProperty('eowAppLabel') ?: '@string/app_name']
         externalNativeBuild {
             cmake {
                 targets 'main', 'SDL3-shared'

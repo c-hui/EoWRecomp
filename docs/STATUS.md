@@ -2,6 +2,20 @@
 
 Atualizado: 2026-10-20 (sessão 3: macOS / Android).
 
+## Android prologue and movie fixes — 2026-11-12
+
+Integrated selected fixes from upstream #22/#23 onto the stock-Adreno/Chinese-text branch:
+the exact `1001a65870` jump-table crash (requires regenerated game code), packed-RomFS movies,
+Vulkan SUST image stores, BRX/warp/stencil handling, ClearBuffer and present/cache/UI fixes.
+Movie IO and storage-image output were tested on Adreno 840; 20,000 synthetic shader programs
+had zero GLSL compile/validation failures and zero MSL differences against the preceding fork.
+Bounds/reuse checks and regression coverage are included. See
+[Android validation](ANDROID-validation.md#prologue-crash-movies-and-shader-stores--2026-11-12).
+
+Pending device acceptance: replay the post-rescue transition with the regenerated library;
+the user's skipped-scene report is not yet confirmed fixed. No Metal or full-playthrough validation.
+An optional separate application ID supports testing when the old signing key is on another computer.
+
 ## Android Adreno validation — 2026-11-11
 
 Startup, shadow geometry, packed HUD colors and Chinese text were verified on Adreno 840 / Android 17,

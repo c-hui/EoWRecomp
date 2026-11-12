@@ -10,7 +10,7 @@ packed into a personal APK that you keep to yourself.
 
 ## Build (on a Mac or Linux computer)
 
-Android SDK with NDK 27.2 (`sdkmanager 'ndk;27.2.12479018' 'platforms;android-36'`), Java 17+, and the macOS setup
+Android SDK with NDK 27.2 (`sdkmanager 'ndk;27.2.12479018' 'platforms;android-36' 'build-tools;36.0.0'`), Java 17+, and the macOS setup
 of [BUILD-macos.md](BUILD-macos.md) (or Linux's) for the recompiler's Python.
 
     tools/android/build_deps.sh                  # FFmpeg, shaderc, Vulkan headers, VMA, volk, SDL3 (once, ~15 min)
@@ -21,6 +21,22 @@ of [BUILD-macos.md](BUILD-macos.md) (or Linux's) for the recompiler's Python.
 `runtime/cpu.h` `GUEST_SHIFT`) and compiles with the NDK at -O2. The result is
 `android/app/build/outputs/apk/debug/app-debug.apk`; `--push` copies a new game library into an installed debug app
 over adb instead.
+
+### Test beside an APK signed on another computer
+
+An update must use the installed APK's original signing key. If that key is unavailable, retain the
+original installation and build a separate app (same Java/native namespace, separate application ID):
+
+    cd android
+    ./gradlew assembleDebug -PeowApplicationId=com.eowrecomp.testing -PeowAppLabel='EoW Test' \
+        -PeowGameLib=/absolute/path/to/build/android/gamelib
+
+Install the resulting personal APK with `adb install`. The test app has its own files and saves;
+copy a backup of the desired save into it and configure its own game-data access. An existing
+`romfs.src` must point to a package this app can access. Do not uninstall the original app to work
+around a signing mismatch. Keep personal APKs and game libraries private.
+
+`androidBuildToolsVersion` overrides the default 36.0.0 build tools if needed.
 
 ## On the phone
 

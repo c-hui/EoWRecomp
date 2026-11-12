@@ -37,6 +37,7 @@ uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
 static _Atomic int stat_compiles;
+_Atomic unsigned vk_pipelines_made;  // (never reset: device.c saves the pipeline cache when it grew)
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 static char stats_text[2048];
@@ -443,9 +444,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
             if (s->npools == 16) FATAL("descriptor pools exhausted\n");
             VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
-                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024}};
+                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}};
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 5, .pPoolSizes = sizes};
+                                             .poolSizeCount = 6, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1209,7 +1211,7 @@ static void compile_program(void *arg) {
     free(sv);
     free(sf);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
-    atomic_fetch_add(&stat_compiles, 1);
+    atomic_fetch_add(&stat_compiles, 1), atomic_fetch_add(&vk_pipelines_made, 1);
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
@@ -1246,11 +1248,14 @@ static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
 
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
+    vkey->const_size = np->stages[0].const_offset ? np->stages[0].const_size : 0;
+    fkey->const_size = np->stages[1].const_offset ? np->stages[1].const_size : 0;
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->stencil_tex) { h ^= fkey->stencil_tex; h *= 0x100000001B3ull; }  // (keys without it hash as before)
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -1537,7 +1542,7 @@ static void build_pipeline(void *arg) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
     }
-    atomic_fetch_add(&stat_compiles, 1);
+    atomic_fetch_add(&stat_compiles, 1), atomic_fetch_add(&vk_pipelines_made, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
 }
 
@@ -1564,6 +1569,28 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     uint32_t tic = h & 0xFFFFF;
     if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) return NULL;
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+}
+
+// Texture slots of a translated stage bound to the stencil of a depth-stencil texture (NVN depth-stencil mode
+// STENCIL on the view or the texture, or a stencil-only format): ShaderKey.stencil_tex for the GLSL integer samplers.
+// The rifts' cut-out draw (fs 12a46f5000: pulls the scene's depth in front of itself where two stencil bits are clear,
+// so the EQUAL pass leaves a hole) reads the stencil that way; sampled as depth, the float's bits decided: in Hyrule
+// Castle Town the houses' roofs and walls came out striped and doorsteps black.
+static uint16_t stencil_slots(int stage, const ShaderInfo *si) {
+    uint16_t m = 0;
+    for (int i = 0; i < si->ntex && i < 16; i++) {
+        const ShaderTexture *t_ = &si->tex[i];
+        if (t_->is_image || t_->shadow || t_->bindless) continue;
+        int slot = ((int)t_->handle_offset - 0x20) / 8;
+        uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
+        uint32_t tic = h & 0xFFFFF;
+        if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) continue;
+        const NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+        if (!e->tex || !renderer_format_has_stencil(e->tex->format)) continue;
+        uint32_t mode = e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode;
+        if (mode == 1 || e->tex->format == 0x31) m |= (uint16_t)(1u << i);
+    }
+    return m;
 }
 
 static bool is_attachment(NvnTexture *t) {
@@ -2397,6 +2424,25 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
 }
 
+// Bound image (SUST): driver binding table offset 0x120 + 8 * slot = st.img[stage][slot], the texture pool ID
+// (nvnDeviceGetImageHandle), registered with nvnTexturePoolRegisterImage
+static VkImageView image_view(int stage, ShaderInfo *si, int i) {
+    int slot = i < si->ntex ? ((int)si->tex[i].handle_offset - 0x120) / 8 : -1;
+    uint64_t h = slot >= 0 && slot < 8 ? st.img[stage][slot] : 0;
+    uint32_t id = h & 0xFFFFF;
+    VkImageView v = VK_NULL_HANDLE;
+    if (h && st.tpool && id < (uint32_t)st.tpool->count) {
+        NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[id];
+        if (e->tex) v = vk_storage_view(e->tex, &e->view, e->has_view);
+    }
+    if (!v && h) {
+        static int nlog;
+        NvnTexture *t = st.tpool && id < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[id].tex : NULL;
+        if (nlog++ < 10) LOG("[vk] image slot %d (id %u) not storable: nvn fmt %#x flags %#x\n", slot, id, t ? t->format : 0, t ? t->flags : 0);
+    }
+    return v ? v : vk_dummy_storage_view();
+}
+
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
@@ -2428,6 +2474,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_sc[sg][ti][0] = sc[0]; tex_sc[sg][ti][1] = sc[1];
                 tex_wh[sg][ti][0] = wh[0]; tex_wh[sg][ti][1] = wh[1];
             }
+            w[n].pImageInfo = &ii[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding >= 32) {
+            ii[n] = (VkDescriptorImageInfo){VK_NULL_HANDLE, image_view(stage, si, (int)b->binding - 32), VK_IMAGE_LAYOUT_GENERAL};
             w[n].pImageInfo = &ii[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
@@ -2482,7 +2531,7 @@ static void build_compute(void *arg) {
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
-    atomic_fetch_add(&stat_compiles, 1);
+    atomic_fetch_add(&stat_compiles, 1), atomic_fetch_add(&vk_pipelines_made, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
     if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
 }
@@ -2501,6 +2550,7 @@ static CsProg *compute_program(NvnProgram *np) {
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
     k.glsl = 1;
+    k.const_size = ss->const_offset ? ss->const_size : 0;
     pthread_mutex_lock(&translate_lock);
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
     pthread_mutex_unlock(&translate_lock);
@@ -2626,6 +2676,10 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(pr && atomic_load(&pr->state) == 0 ? SKIP_PROG_PENDING : SKIP_PROG_FAILED); return; }
+    if ((fkey.stencil_tex = stencil_slots(1, pr->fi))) {  // a stencil view bound: the variant with integer samplers
+        pr = get_program(st.program, &vkey, &fkey);
+        if (!pr || atomic_load(&pr->state) != 1) { SKIP(pr && atomic_load(&pr->state) == 0 ? SKIP_PROG_PENDING : SKIP_PROG_FAILED); return; }
+    }
     {   // fragment-shader hash: skip lists (EOWRECOMP_SKIP_FSHASH), debug logging
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -3761,6 +3815,20 @@ static void exec_list(uint64_t handle, int depth) {
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
             break;
+        case CMD_CLEAR_BUFFER: {
+            // ClearBuffer(cmd, address, size, value): recorded but never executed until now (PokeZ-Android found the
+            // same gap). In command order like the buffer copy above: the GPU's earlier work done, then the 32-bit
+            // fill in guest memory.
+            static int logged;
+            if (!logged++) LOG("[nvn] ClearBuffer %llx +%llu = %#x (first use)\n", (unsigned long long)r->x[0],
+                               (unsigned long long)r->x[1], (unsigned)r->x[2]);
+            if (!r->x[0] || !r->x[1]) break;
+            wait_why = "buffer clear";
+            renderer_flush();
+            uint32_t *d = (uint32_t *)(uintptr_t)r->x[0], v = (uint32_t)r->x[2];
+            for (uint64_t i = 0; i < r->x[1] / 4; i++) d[i] = v;
+            break;
+        }
         default: break;
         }
         p += r->size;

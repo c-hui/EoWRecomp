@@ -118,6 +118,9 @@ static uint64_t gen_insn(uint32_t pc, uint32_t total) {
         static const uint32_t srs[] = {0x00, 0x12, 0x21, 0x22, 0x23, 0x25, 0x26, 0x27, 0x50};
         w = setf(w, 20, 8, srs[rnd(sizeof srs / sizeof srs[0])]);
     }
+    // Mode 3 is reserved, and older reference translators index past their vote-expression arrays for it.
+    // Compare valid modes here; test_translate_edges covers rejecting mode 3 in the current translator.
+    if (is(w, 0x50d8000000000000ull, 0xfff8000000000000ull)) w = setf(w, 48, 2, rnd(3));
     if (is(w, 0x5080000000000000ull, 0xfff8000000000000ull) && rnd(100) < 90) {  // MUFU: valid functions
         static const uint32_t fns[] = {0, 1, 2, 3, 4, 5, 8};
         w = setf(w, 20, 4, fns[rnd(7)]);
@@ -163,6 +166,16 @@ static size_t gen_program(uint8_t *buf, size_t cap, int stage) {
     for (int g = 0; g < groups; g++) {
         code[i++] = rnd64();  // scheduling word
         for (int k = 0; k < 3; k++, i++) code[i] = gen_insn((uint32_t)i * 8, total);
+        // SUST.B (compute GLSL): mostly 2D RGBA with its handle loaded just before from the bound-image table, as the
+        // game's shaders do (MOV Rh, c[2][0x120 + 8 * slot]); otherwise the translation always fails
+        for (int k = 1; k < 3; k++) {
+            uint64_t *s = &code[i - 3 + k];
+            if (!is(*s, 0xeb20000000000000ull, 0xfff8000000000000ull) || rnd(100) >= 80) continue;
+            *s = setf(setf(*s, 33, 3, 3), 20, 4, 15);
+            uint32_t h = (uint32_t)getf(*s, 39, 8) == 255 ? 3 : (uint32_t)getf(*s, 39, 8);
+            *s = setf(*s, 39, 8, h);
+            s[-1] = 0x4c98000000000000ull | 0xfull << 39 | 2ull << 34 | (uint64_t)((0x120 + 8 * rnd(4)) / 4) << 20 | 7ull << 16 | h;
+        }
     }
     code[i++] = 0x001f8000fc0007e0ull;
     code[i++] = 0xe30000000007000full;  // EXIT

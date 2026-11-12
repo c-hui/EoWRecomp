@@ -67,7 +67,51 @@ After:
 
 ## Remaining limitations
 
-- The packed-RomFS setup's FFmpeg path still needs physical video files. During device validation, the user's own 19 WebM files were materialized into their private game-data directory to resolve the black title. Those files, game binaries, generated code, keys, saves and the personal APK are **not included** in this contribution. A general virtual-RomFS FFmpeg reader is separate work.
-- Graphics snapshots are read-only; this does not implement general mobile GPU-write/compute fallback. Existing unsupported compute instructions remain.
+- Graphics snapshots are read-only; this does not implement general mobile GPU-write/compute fallback. SUST.P.B 2D RGBA stores are now supported on Vulkan; other unsupported instructions remain.
 - Some Windows replay runs, including an original-font control, blocked in guest initialization. No fix for those waits is claimed. The documented full-scene no-import comparison completed before/after with a 3 ms pacing hook.
 - No sustained FPS improvement, thermal result or Metal result is claimed.
+
+## Prologue crash, movies and shader stores — 2026-11-12
+
+The preceding installed build's retained log ended with `FATAL: no function at 1001a65870`.
+The user's own supported main module contains an ADR followed by a BR seven instructions later;
+the six-instruction classifier treated the case base as a callback and split the function.
+The regenerated function now contains the missing case as an internal label. Integrate both
+generator corrections from upstream [#22](https://github.com/Nycolazs/EoWRecomp/pull/22),
+including its later 64-instruction window and distinction between integer and SIMD registers.
+**An existing game library must be regenerated and rebuilt; replacing the runtime alone is insufficient.**
+
+Selected fixes from #22 and [#23](https://github.com/Nycolazs/EoWRecomp/pull/23) also provide:
+
+- FFmpeg reads directly from the packaged RomFS, with the extracted-directory fallback retained.
+  Reopening an extractor clears packet/EOF/selection state; allocation failures and invalid/overflowing
+  seeks return errors and release the custom IO buffer.
+- SUST.P.B 2D RGBA image stores, storage descriptors and image views on Vulkan; bounded BRX
+  compiler-table inspection, 32-lane warp operations inside wider subgroups, stencil texture views,
+  and execution of NVN ClearBuffer. The earlier overlapping LDC.64 fix is retained.
+- Present-interval pacing, periodic pipeline-cache saves and a polling/sleeping Android UI loop.
+  The stock-driver graphics snapshots and Chinese font/language fixes remain in use.
+
+The BRX optimization now requires the caller's actual compiler-constant size; unknown or short
+constant regions retain the dispatch fallback. Reserved VOTE mode 3 returns a translation error
+before indexing the three-expression array. The fuzz generator compares valid vote modes with
+the older reference; a separate boundary test covers the reserved encoding.
+
+| Validation | Result |
+| --- | --- |
+| `python3 tools/test_jump_tables.py` | Seven tests pass, including scheduled BR, FP register writes, control transfers and the scan limit. The previous classifier misses the scheduled-BR regression. |
+| `test_translate_edges` with host AddressSanitizer/UndefinedBehaviorSanitizer | BRX constant bounds and reserved VOTE rejection pass; leak detection disabled for the sandbox's ptrace environment. |
+| `test_movie_io` on Adreno 840 / Android 17 | The user's opening WebM yields the same 5,081 packets through image and file readers; reopen, seek, EOF and failure cleanup pass. No media is bundled. |
+| `test_vk_sust` on stock Adreno 840 | The translated Maxwell program writes RGBA `64 128 191 255` into a Vulkan storage image, verified by GPU readback. |
+| Existing `test_vk_ldc`, `test_vk_gmem`, `test_vk_packed` on that phone | Overlapping loads, both staged/native global-memory controls and all three RGB565 primaries pass. |
+| 20,000 synthesized translator programs, reference `94cb4b0` | MSL: zero differences. GLSL: 14,259 compile and validate, zero compile/validation failures. Unsupported/random encodings are rejected (5,741 translations), not counted as successfully supported instructions. |
+| Android native runtime | Builds with NDK 27.2.12479018; Vulkan tested, Metal not tested. |
+
+The report of the post-rescue movie being skipped is **not yet a verified end-to-end fix**:
+the retained game logs only open the title movie, even though all 19 WebMs exist on the phone.
+The IO test verifies the opening resource, not the game's transition into it. Replay the rescue
+with the regenerated library and inspect the new movie-open/decoder logs before claiming that
+the scene plays correctly. No complete playthrough or sustained performance claim is made.
+
+When the preceding APK's signing key is unavailable, use the separate application ID documented
+in [BUILD-android.md](BUILD-android.md). Keep the original installation and test using a save copy.

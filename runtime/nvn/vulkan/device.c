@@ -211,6 +211,7 @@ static void create_device(void) {
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     b->shaderClipDistance = h->shaderClipDistance;
+    b->shaderStorageImageWriteWithoutFormat = h->shaderStorageImageWriteWithoutFormat;  // (SUST: image format from the texture)
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
@@ -612,6 +613,15 @@ void backend_present(NvnTexture *t) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+    {   // the pipeline cache to disk every 30 s while new pipelines appear: phones end apps without exit() or a
+        // background event (killed, crashed), and Turnip takes seconds per new pipeline on an Adreno 740
+        extern _Atomic unsigned vk_pipelines_made;
+        static unsigned saved;
+        static uint64_t at;
+        uint64_t now = SDL_GetTicksNS();
+        unsigned m = atomic_load(&vk_pipelines_made);
+        if (m != saved && now - at > 30000000000ull) saved = m, at = now, vk_pipeline_cache_save();
+    }
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
@@ -847,13 +857,27 @@ void backend_clear_window(void) {
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
 
+// The next host event, waiting up to 16 ms. Android: SDL_WaitEventTimeout never sleeps there (each pump queues a poll
+// sentinel, whose wakeup makes Android_PumpEvents return at once): with a controller attached the UI thread spun on
+// a big core, 77% of the app's CPU cycles in clock_gettime / joystick polling (simpleperf on an AYN Thor). Poll, then
+// sleep 4 ms (input latency within a 33 ms frame).
+static bool next_event(SDL_Event *e) {
+#ifdef __ANDROID__
+    if (SDL_PollEvent(e)) return true;
+    SDL_DelayNS(4000000);
+    return false;
+#else
+    return SDL_WaitEventTimeout(e, 16);
+#endif
+}
+
 int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
-        while (SDL_WaitEventTimeout(&e, 16)) {
+        while (next_event(&e)) {
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 exit(0);
