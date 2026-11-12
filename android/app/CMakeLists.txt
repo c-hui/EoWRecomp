@@ -23,6 +23,9 @@ set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS OFF CACHE BOOL "" FORCE)
 set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(${ROOT}/build/android/SDL3 ${CMAKE_BINARY_DIR}/SDL3)
+# NDK 27 defaults SDL's shared library to 4 KiB segments even though main already uses 16 KiB.
+# Every packaged ELF must meet the page-size requirement, including SDL, or Android shows a compatibility dialog.
+target_link_options(SDL3-shared PRIVATE "-Wl,-z,max-page-size=16384")
 
 # ---- the game code library's id (runtime/gamelib.h): the same script makes the library's
 execute_process(COMMAND ${BASH_EXECUTABLE} ${ROOT}/tools/android/gamelib_id.sh OUTPUT_VARIABLE GAMELIB_ID OUTPUT_STRIP_TRAILING_WHITESPACE

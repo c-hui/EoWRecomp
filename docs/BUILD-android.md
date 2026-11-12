@@ -38,6 +38,11 @@ around a signing mismatch. Keep personal APKs and game libraries private.
 
 `androidBuildToolsVersion` overrides the default 36.0.0 build tools if needed.
 
+Both the runtime and SDL shared libraries are linked with 16 KiB segment alignment. Check the
+personal APK's other native libraries as well (including a bundled game library or on-device compiler):
+all ELF LOAD segments need alignment of at least `0x4000`. For an APK with uncompressed libraries,
+also check `zipalign -c -P 16 -v 4 app-debug.apk`.
+
 ## On the phone
 
 1. Copy your `.nsp` (or `.xci`) and your `prod.keys` into one folder, e.g. `Download/EoW`.
