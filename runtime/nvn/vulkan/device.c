@@ -579,6 +579,18 @@ void vk_frame_end(const char *shot_path) {
 }
 
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
+#ifdef __ANDROID__
+    // SDL treats relative paths as Android assets; debug screenshots belong in the writable data directory.
+    char absolute[4096];
+    if (path[0] != '/' && getcwd(absolute, sizeof absolute)) {
+        size_t n = strlen(absolute);
+        if (n + 1 + strlen(path) < sizeof absolute) {
+            absolute[n++] = '/';
+            strcpy(absolute + n, path);
+            path = absolute;
+        }
+    }
+#endif
     SDL_Surface *s = SDL_CreateSurfaceFrom((int)w, (int)h, SDL_PIXELFORMAT_ABGR8888, (void *)rgba, (int)w * 4);
     if (!s || !SDL_SavePNG(s, path)) LOG("[vk] saving %s failed: %s\n", path, SDL_GetError());
     else LOG("[vk] saved %s (%ux%u)\n", path, w, h);

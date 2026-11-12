@@ -2,6 +2,16 @@
 
 Atualizado: 2026-10-20 (sessão 3: macOS / Android).
 
+## Stock-Adreno rift rendering — 2026-11-12
+
+The Zelda checkpoint's striped rift is fixed on the stock Adreno 840: feedback snapshots now
+preserve stencil sampling instead of substituting the depth view. The user confirmed the black
+interior and continuous purple edge. Bounded coherent compute copy-back, VMNMX/ATOM and logical
+warp registers are GPU-tested; fragment-store work grids retain guest dimensions. Remaining
+upstream PR claims were audited against the current driver/hardware, with dispositions and
+limits in [Android validation](ANDROID-validation.md#stock-adreno-rifts-and-remaining-pr-audit--2026-11-12).
+No full-playthrough, Metal or sustained-performance claim.
+
 ## Android prologue and movie fixes — 2026-11-12
 
 Integrated selected fixes from upstream #22/#23 onto the stock-Adreno/Chinese-text branch:

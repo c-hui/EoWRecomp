@@ -137,3 +137,68 @@ All three APK libraries (SDL, runtime and game code) passed 16 KiB LOAD-segment 
 APK passed 16 KiB ZIP alignment and signature verification, and the final installation started
 without the previous compatibility dialog. This device acceptance does not replace replaying
 the specific post-rescue cutscene; that transition remains unverified.
+
+
+## Stock-Adreno rifts and remaining PR audit — 2026-11-12
+
+The post-rescue Zelda room exposed a separate rendering defect after the earlier APK acceptance:
+the rift had purple stripes over an intact floor. This is now visually fixed on stock Adreno 840
+(Android 17, Vulkan 1.4.295); the user confirmed the black void, continuous purple border and
+floating fragments. This verifies this room, not every rift or a complete playthrough.
+
+The fixes are cumulative:
+
+- Without host-memory import, compute LDG/STG now uses coherent per-dispatch snapshots of the
+  bound storage ranges, retires storing dispatches, then restores only their bound bytes to the
+  guest heap. Constant-buffer and vertex snapshots can then see the results. No whole-heap copy
+  or Turnip/AHardwareBuffer dependency is introduced. This fallback adds waits; it is not an FPS
+  optimization, and it does not implement general graphics-stage global-memory write-back.
+- Upstream #23's VMNMX/returning ATOM and S2R lane-ID/masks were adapted to this GMap path.
+  The preceding translator rejects the synthetic ATOM and returns incorrect lane registers;
+  the updated programs produce the expected results on the phone.
+- `resolve_feedback` previously substituted the depth view even when the texture slot selected
+  stencil. The rift cut-out fragment shader's integer sampler therefore read the wrong aspect.
+  New and reused feedback snapshots now retain separate depth/stencil views and choose the
+  aspect of the original binding. Original and copied depth readbacks were byte-identical:
+  the defect was view selection, not corrupted depth-copy data.
+- Upstream #22's fragment-store work-grid fix keeps light grids at guest dimensions. The room
+  uses 64x36 and 128x72 grids; scaling these changes the number of shader invocations and the
+  cells addressed. They must retain their dimensions even when the display scale differs.
+- Shader dump creation now makes its parent directory, and Android PNG diagnostics use an
+  absolute writable path instead of SDL's relative asset lookup. Snapshot images permit the
+  transfer-source usage required by their debug readback.
+
+| Check | Result |
+| --- | --- |
+| `test_vk_compute_copyback` | Empty-map control loses the payload; staged LDG/STG returns and copies back `1234abcd`. |
+| `test_vk_atomics` | VMNMX signed three-way max gives 7; ATOM returns `1234abcd` and stores `1234abce`; subsequent STG and CPU copy-back preserve the expected values. |
+| `test_vk_lane_masks` | All six S2R values match over 64 invocations / two logical warps. The preceding translator fails the control. |
+| `test_vk_depth_copy` | 1,376,320 texels retain depth and stencil through combined/separate copies, with and without attachment usage. Separate float-depth and uint-stencil sampling has zero mismatches. |
+| 2,000 synthesized programs after the new translator changes | 1,312 compile and validate; zero GLSL compile/validation failures, 688 unsupported/random encodings rejected. MSL equality to the old translator is intentionally not claimed for the changed instructions. |
+| Existing BRX/VOTE ASan/UBSan and jump-table checks | Pass, including all seven generator cases. |
+
+### Disposition of other open upstream PRs
+
+The open-PR list was checked again on 2026-11-12. #6 (RGB565) and #25 (Chinese/stock-driver
+read-only storage) are already integrated and GPU-tested. #24 is documentation for the other
+contributor's device; its 30 fps results are not evidence for this phone. Older closed parts are
+superseded by #22/#23 and were not applied twice.
+
+The applicable correctness fixes from #22/#23 are included, including the earlier feature,
+extractor, movie, present-interval, pipeline-cache, SDL-loop, jump-table, LDC.64, BRX, warp,
+SUST, stencil and ClearBuffer changes. The following remaining proposals are not treated as
+verified defects of this installation:
+
+- Turnip/AHardwareBuffer/BDA and timeline emulation target a different driver path. This phone
+  remains on its stock driver; the required compute-coherence behavior is adapted above.
+- Single-prime-core thread-affinity inheritance: this device has two equal fastest cores
+  (6 and 7 at 4,608,000 kHz; the other six at 3,628,800). The existing `ntop != 1` guard disables
+  that affinity policy, so the reported single-core inheritance path is inactive here.
+- The fixed 720p option is an additional resolution preset, not a correctness repair. Existing
+  resolution preferences are preserved. Dispatch-cache placement, pacing backoff, Turnip's
+  NaN instruction lowering and extra profiling tools lack a demonstrated benefit/defect on
+  this phone and are not imported as verified fixes. Existing min/max/saturate NaN handling
+  already explicitly checks NaNs.
+
+No Metal, full-playthrough or sustained-FPS claim is made. The exact post-rescue movie transition
+still needs replay; title-video IO and this post-rescue save are independently verified.
