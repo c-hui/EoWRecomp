@@ -382,7 +382,10 @@ class Module:
         # A huge function with the all-instruction fallback (thousands of labels, one big switch) sends clang's
         # optimizer into the hours (main 1.0.0: f_7000a7c130, f_7001389610 - over an hour each at -O1): unoptimized
         # those compile in seconds.
-        huge = bool(tables) and (end - entry) // 4 > OPTNONE_INSNS and entry not in hle
+        # Android compiles at -O2 rather than desktop's -O1. LLVM also spends many minutes optimizing
+        # 1,900-2,800-instruction all-label dispatchers there (below the desktop guard), so protect them sooner.
+        limit = 1500 if SHIFT else OPTNONE_INSNS
+        huge = bool(tables) and (end - entry) // 4 > limit and entry not in hle
         attr = '__attribute__((optnone, noinline)) ' if huge else ''
         if huge:
             self.stats['optnone'] += 1

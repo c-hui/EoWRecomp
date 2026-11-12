@@ -15,6 +15,9 @@ Bounds/reuse checks and regression coverage are included. See
 Pending device acceptance: replay the post-rescue transition with the regenerated library;
 the user's skipped-scene report is not yet confirmed fixed. No Metal or full-playthrough validation.
 An optional separate application ID supports testing when the old signing key is on another computer.
+The Android generator also lowers its existing large-dispatcher optimization guard to avoid
+multi-minute LLVM `-O2` stalls; a formerly slow 2,807-instruction function compiled in 2.927 s.
+SDL and the main runtime now both have 16 KiB ELF segment alignment, verified in the APK.
 
 ## Android Adreno validation — 2026-11-11
 

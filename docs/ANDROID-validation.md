@@ -97,6 +97,13 @@ constant regions retain the dispatch fallback. Reserved VOTE mode 3 returns a tr
 before indexing the three-expression array. The fuzz generator compares valid vote modes with
 the older reference; a separate boundary test covers the reserved encoding.
 
+The Android rebuild also exposed LLVM optimization blow-ups below the existing 3,000-instruction
+dispatcher guard: an individual 2,807-instruction all-label function consumed over four minutes
+of compiler CPU time. Android's `-O2` generation now applies the same existing `optnone` policy
+above 1,500 instructions (desktop's guard remains unchanged). That function then compiled in
+2.927 seconds on the same host. This changes the game-library ID and requires regenerating the
+affected chunks. No claim is made about sustained gameplay performance after this build-time change.
+
 | Validation | Result |
 | --- | --- |
 | `python3 tools/test_jump_tables.py` | Seven tests pass, including scheduled BR, FP register writes, control transfers and the scan limit. The previous classifier misses the scheduled-BR regression. |
