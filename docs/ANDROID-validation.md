@@ -122,3 +122,18 @@ the scene plays correctly. No complete playthrough or sustained performance clai
 
 When the preceding APK's signing key is unavailable, use the separate application ID documented
 in [BUILD-android.md](BUILD-android.md). Keep the original installation and test using a save copy.
+
+### Rebuilt APK acceptance
+
+The separate-ID personal APK loaded all four rebuilt modules (294,862 functions). Its title
+movie opened directly from the packaged RomFS (69,188,808 bytes), with no extracted movie
+directory in the test app. The Chinese file selector and the latest Zelda checkpoint loaded;
+the live dungeon room rendered, with no fatal or shader-translation/pipeline failures in this
+short run. Compute dispatches ran without the previous unsupported-SUST skips. A brief room
+sample was approximately 24–26 fps at the copied resolution setting; this is not a 30 fps or
+sustained-performance claim. The original 22 save files matched the backup before cleanup.
+
+All three APK libraries (SDL, runtime and game code) passed 16 KiB LOAD-segment checks, the
+APK passed 16 KiB ZIP alignment and signature verification, and the final installation started
+without the previous compatibility dialog. This device acceptance does not replace replaying
+the specific post-rescue cutscene; that transition remains unverified.

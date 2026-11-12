@@ -12,8 +12,11 @@ had zero GLSL compile/validation failures and zero MSL differences against the p
 Bounds/reuse checks and regression coverage are included. See
 [Android validation](ANDROID-validation.md#prologue-crash-movies-and-shader-stores--2026-11-12).
 
-Pending device acceptance: replay the post-rescue transition with the regenerated library;
-the user's skipped-scene report is not yet confirmed fixed. No Metal or full-playthrough validation.
+Device acceptance: the personal APK loads all four rebuilt modules, plays the title movie directly
+from packaged RomFS, displays Chinese file-selection text and loads the latest Zelda checkpoint.
+No fatal or shader translation/pipeline failure appeared in that short run. The specific post-rescue
+transition still needs replay; the skipped-scene report is not yet confirmed fixed. No Metal,
+full-playthrough or sustained-performance validation.
 An optional separate application ID supports testing when the old signing key is on another computer.
 The Android generator also lowers its existing large-dispatcher optimization guard to avoid
 multi-minute LLVM `-O2` stalls; a formerly slow 2,807-instruction function compiled in 2.927 s.
